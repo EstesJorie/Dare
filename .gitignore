@@ -1,4 +1,6 @@
 login.txt
+uploadedFiles.txt
+.config
 *.xcf
 .DS_Store
-.UPLOADS/*
+.UPLOADS/
