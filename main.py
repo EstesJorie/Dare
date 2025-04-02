@@ -1,11 +1,22 @@
 from instabot import Bot
 from datetime import datetime
 from PIL import Image
+from functools import wraps
 import os
 import schedule
+import random
 import time
 import math
+import shutil
 
+def configRemoval():
+    path="config"
+    if os.path.exists(path):
+        try:
+            shutil.rmtree(path)
+            print("Removed existing config folder.")
+        except Exception as e:
+            print(f"Error removing config: {str(e)}")
 
 def loadCredentials(filePath):
     credentials = {}
@@ -81,8 +92,30 @@ def imageResize(imagePath):
         print(f"Error processing image: {str(e)}")
         return None
 
+def retryWithBackoff(retries=3, backoffSecs=1):
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            x=0
+            while True:
+                try:
+                    return func(*args, **kwargs)
+                except Exception as e:
+                    if x == retries:
+                        raise e
+                    sleepTime = (backoffSecs ** 2 ** x + random.uniform(0, 1))
+                    time.sleep(sleepTime)
+                    x += 1
+        return wrapper
+    return decorator
+
+@retryWithBackoff(retries=3, backoffSecs=5)
+def instagramUpload(bot, photoPath, caption):
+    return bot.upload_photo(photoPath, caption=caption)
 
 def uploadImage():
+    configRemoval()
+    
     if not os.path.exists(imageFolder):
         os.makedirs(imageFolder)
         print(f"Created {imageFolder} directory")
@@ -92,52 +125,44 @@ def uploadImage():
     caption = f"Song of Today: {todayDate}"
 
     try:
-        imageFiles = [f for f in os.listdir(imageFolder) if f.endswith(('jpg','png','jpeg', 'PNG', 'JPEG', 'JPG'))]
+        imageFiles = [f for f in os.listdir(imageFolder) if f.lower().endswith(('jpg','png','jpeg'))]
         if not imageFiles:
             print("No images found in the folder")
-            return
-        
+            return False
+
         imageFiles.sort(key=lambda x:os.path.getmtime(os.path.join(imageFolder, x)), reverse=True)
         
-        latestImage = None
-        for img in imageFiles:
-            if not isAlreadyUploaded(img):
-                latestImage = os.path.join(imageFolder, img)
-                break
-        
+        latestImage = next((img for img in imageFiles if not isAlreadyUploaded(img)), None)
         if not latestImage:
             print("No new images to upload")
-            return
+            return False
 
+        latestImage = os.path.join(imageFolder, latestImage)
+        
         converted = False
         newImagePath = latestImage
-        if not latestImage.lower().endswith('.jpg'):
-            try:
+        processedImage = None
+        
+        try:
+            if not latestImage.lower().endswith('.jpg'):
                 img = Image.open(latestImage)
                 base, _ = os.path.splitext(latestImage)
                 newImagePath = base + '.jpg'
                 img.convert('RGB').save(newImagePath, 'JPEG')
                 converted = True
                 print(f"Converted image to {newImagePath}")
-            except Exception as e:
-                print(f"Error converting image: {str(e)}")
-                return
 
-        # Process image for Instagram
-        processedImage = imageResize(newImagePath)
-        if not processedImage:
-            print("Failed to process image")
-            return
-    
+            processedImage = imageResize(newImagePath)
+            if not processedImage:
+                raise Exception("Failed to process image")
 
-        print(f"Uploading {processedImage} with caption: {caption}")
-        try:
             cookie_path = "config"
             if os.path.exists(cookie_path):
                 import shutil
                 shutil.rmtree(cookie_path)
 
-            bot = Bot()
+            time.sleep(random.uniform(2, 4))  
+            
             logged_in = bot.login(
                 username=username,
                 password=password,
@@ -146,38 +171,41 @@ def uploadImage():
             )
             
             if not logged_in:
-                print("Failed to login to Instagram")
-                return
+                raise Exception("Failed to login")
             
-            time.sleep(2) 
+            time.sleep(random.uniform(3, 5)) 
             
-            success = bot.upload_photo(
-                processedImage,
-                caption=caption
-            )
+            success = instagramUpload(bot, processedImage, caption)
             
             if success:
                 logUploadedFile(os.path.basename(latestImage))
                 print("Upload successful")
+                return True
             else:
-                print("Upload failed")
+                raise Exception("Upload failed")
                 
         except Exception as e:
-            print(f"Error during upload: {str(e)}")
+            print(f"Error during process: {str(e)}")
+            return False
         finally:
             if 'bot' in locals() and bot:
+                time.sleep(1)
                 bot.logout()
-            if converted and os.path.exists(newImagePath):
-                os.remove(newImagePath)
-            if processedImage != newImagePath and os.path.exists(processedImage):
-                os.remove(processedImage)
+            
+            for path in [newImagePath, processedImage]:
+                if path and path != latestImage and os.path.exists(path):
+                    try:
+                        os.remove(path)
+                    except Exception as e:
+                        print(f"Error cleaning up {path}: {str(e)}")
+                        
     except Exception as e:
         print(f"General error: {str(e)}")
+        return False
 
-uploadImage()
 
-#schedule.every().day.at("23:00").do(uploadImage)
+schedule.every().day.at("23:00").do(uploadImage)
 
-#while True:
- #   schedule.run_pending()
- #   time.sleep(1)
+while True:
+    schedule.run_pending()
+    time.sleep(60)
